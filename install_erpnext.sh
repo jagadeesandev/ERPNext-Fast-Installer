@@ -203,10 +203,43 @@ setup_mariadb() {
     
     # Start MariaDB service
     log_message "Starting MariaDB service..." "INFO"
+    
+    # First, try to clean up any previous failed installations
+    if systemctl is-active --quiet mariadb; then
+        log_message "MariaDB service is already running, stopping it first..." "INFO"
+        systemctl stop mariadb
+    fi
+    
+    # Reset MariaDB if it's in a failed state
+    if systemctl is-failed --quiet mariadb; then
+        log_message "MariaDB service is in failed state, resetting..." "INFO"
+        systemctl reset-failed mariadb
+    fi
+    
+    # Try to start MariaDB
     systemctl start mariadb
     if [ $? -ne 0 ]; then
-        log_message "Failed to start MariaDB service" "ERROR"
-        exit 1
+        log_message "Failed to start MariaDB service normally, trying cleanup..." "WARN"
+        
+        # Try to purge and reinstall MariaDB
+        log_message "Purging and reinstalling MariaDB..." "INFO"
+        systemctl stop mariadb 2>/dev/null || true
+        apt remove --purge mariadb-server mariadb-client mariadb-common -y 2>/dev/null || true
+        rm -rf /var/lib/mysql /etc/mysql 2>/dev/null || true
+        apt autoremove -y
+        apt autoclean
+        
+        # Reinstall MariaDB
+        apt update
+        apt install mariadb-server -y
+        
+        # Try starting again
+        systemctl start mariadb
+        if [ $? -ne 0 ]; then
+            log_message "Failed to start MariaDB service after cleanup" "ERROR"
+            log_message "Please check system resources and try manual installation" "ERROR"
+            exit 1
+        fi
     fi
     
     # Enable MariaDB to start on boot
