@@ -90,6 +90,8 @@ update_system() {
 }
 
 # Function to create a new user for Frappe
+
+# Function to create a new user for Frappe
 create_frappe_user() {
     log_message "Setting up Frappe user..." "INFO"
     
@@ -97,25 +99,42 @@ create_frappe_user() {
     
     # Check if user already exists
     if id "$frappe_user" &>/dev/null; then
-        log_message "User $frappe_user already exists" "WARN"
-        read -p "Do you want to use this existing user? (y/n): " use_existing
-        if [[ "$use_existing" != "y" && "$use_existing" != "Y" ]]; then
-            create_frappe_user
-            return
-        fi
+        log_message "User $frappe_user already exists" "INFO"
+        log_message "Continuing with existing user $frappe_user" "INFO"
     else
-        # Create new user
-        adduser "$frappe_user"
-        if [ $? -ne 0 ]; then
-            log_message "Failed to create user $frappe_user" "ERROR"
-            exit 1
-        fi
+        # List available users
+        log_message "User $frappe_user does not exist. Available users:" "INFO"
+        awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd | grep -v "nobody"
         
-        # Add user to sudo group
-        usermod -aG sudo "$frappe_user"
-        if [ $? -ne 0 ]; then
-            log_message "Failed to add $frappe_user to sudo group" "ERROR"
-            exit 1
+        read -p "Do you want to use one of these existing users? (y/n): " use_existing
+        
+        if [[ "$use_existing" == "y" || "$use_existing" == "Y" ]]; then
+            read -p "Enter the username of the existing user: " frappe_user
+            
+            # Verify the user exists
+            if ! id "$frappe_user" &>/dev/null; then
+                log_message "User $frappe_user does not exist" "ERROR"
+                create_frappe_user
+                return
+            fi
+            
+            log_message "Using existing user $frappe_user" "INFO"
+            # No need to create a new user, just use the existing one
+        else
+            # Create new user
+            log_message "Creating new user $frappe_user..." "INFO"
+            adduser "$frappe_user"
+            if [ $? -ne 0 ]; then
+                log_message "Failed to create user $frappe_user" "ERROR"
+                exit 1
+            fi
+            
+            # Add user to sudo group
+            usermod -aG sudo "$frappe_user"
+            if [ $? -ne 0 ]; then
+                log_message "Failed to add $frappe_user to sudo group" "ERROR"
+                exit 1
+            fi
         fi
     fi
     
@@ -124,7 +143,6 @@ create_frappe_user() {
     # Export the frappe_user variable for use in other functions
     export FRAPPE_USER="$frappe_user"
 }
-
 # Function to install required packages
 install_packages() {
     log_message "Installing required packages..." "INFO"
@@ -203,10 +221,43 @@ setup_mariadb() {
     
     # Start MariaDB service
     log_message "Starting MariaDB service..." "INFO"
+    
+    # First, try to clean up any previous failed installations
+    if systemctl is-active --quiet mariadb; then
+        log_message "MariaDB service is already running, stopping it first..." "INFO"
+        systemctl stop mariadb
+    fi
+    
+    # Reset MariaDB if it's in a failed state
+    if systemctl is-failed --quiet mariadb; then
+        log_message "MariaDB service is in failed state, resetting..." "INFO"
+        systemctl reset-failed mariadb
+    fi
+    
+    # Try to start MariaDB
     systemctl start mariadb
     if [ $? -ne 0 ]; then
-        log_message "Failed to start MariaDB service" "ERROR"
-        exit 1
+        log_message "Failed to start MariaDB service normally, trying cleanup..." "WARN"
+        
+        # Try to purge and reinstall MariaDB
+        log_message "Purging and reinstalling MariaDB..." "INFO"
+        systemctl stop mariadb 2>/dev/null || true
+        apt remove --purge mariadb-server mariadb-client mariadb-common -y 2>/dev/null || true
+        rm -rf /var/lib/mysql /etc/mysql 2>/dev/null || true
+        apt autoremove -y
+        apt autoclean
+        
+        # Reinstall MariaDB
+        apt update
+        apt install mariadb-server -y
+        
+        # Try starting again
+        systemctl start mariadb
+        if [ $? -ne 0 ]; then
+            log_message "Failed to start MariaDB service after cleanup" "ERROR"
+            log_message "Please check system resources and try manual installation" "ERROR"
+            exit 1
+        fi
     fi
     
     # Enable MariaDB to start on boot
